@@ -73,6 +73,7 @@ The keyboard has to run VIA-compatible firmware (QMK/VIA, or many Royal Kludge, 
 
 ## Troubleshooting
 
+- **Lights flash between two colors/effects:** something else is writing to the same LEDs. Usually it's the vendor RGB app (Gigabyte Control Center, Armoury Crate, iCUE, ...) still running. Quit it and turn off its autostart. It can also be two OpenRGB copies running at once (OpenRGB 1.1 runs as a Windows service; the launcher only starts OpenRGB if it isn't already running).
 - **Lights don't change:** make sure OpenRGB is running with the SDK server on (SDK Server tab → Start Server) and that another RGB app isn't overriding it.
 - **Some fan LEDs stay dark:** raise `ARGB_HEADER_LEDS`, or set your zone sizes in OpenRGB (Resize zone).
 - **Stuck on album colors even with lyrics open:** the full-screen player must be open (not the mini/side lyrics panel), and the window must not be minimized.
