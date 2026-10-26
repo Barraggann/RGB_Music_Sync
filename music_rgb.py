@@ -562,7 +562,28 @@ class CaptureThread(threading.Thread):
 
 
 async def render_loop(lights, keyboard, capture):
+    last_tick = time.time()  # wall clock: always jumps across sleep
     while True:
+        now = time.time()
+        if now - last_tick > 5:
+            # the PC slept: controllers come back in their built-in effect, which
+            # fights our colors (flashing) until they're put in direct mode again
+            print("Resumed from sleep; re-initializing lights")
+            if lights.client:
+                try:
+                    lights.client.disconnect()
+                except Exception:
+                    pass
+            lights.client = None
+            lights.retry_at = 0.0
+            if keyboard.dev:
+                try:
+                    keyboard.dev.close()
+                except Exception:
+                    pass
+            keyboard.dev = None
+            keyboard.retry_at = 0.0
+        last_tick = now
         if time.monotonic() >= lights.retry_at:
             lights.connect()
             if not lights.client:
