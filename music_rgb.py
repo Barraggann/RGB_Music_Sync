@@ -46,10 +46,14 @@ LIVE_SATURATION = 1.35     # boost for the (muted) background colors on LEDs
 LIVE_MIN_BRIGHTNESS = 0.45
 IDLE_COLOR = (40, 40, 60)  # dim color while paused / nothing playing
 ARGB_HEADER_LEDS = 60      # LEDs per fan/strip header (raise if some LEDs stay dark)
-# OpenRGB zones to leave alone, per device name. OpenRGB 1.1 can't drive the fan
-# headers of the Gigabyte B850M EAGLE (IT5711 chip): they keep their rainbow and
-# only flicker when sent colors. Add your own device here if it does the same.
-SKIP_ZONES = {"B850M EAGLE WIFI6E ICE": {"ARGB_V2_1", "ARGB_V2_2", "ARGB_V2_3"}}
+# OpenRGB zones to leave alone, per device name, e.g.
+# {"B850M EAGLE WIFI6E ICE": {"ARGB_V2_1"}} for a header OpenRGB can't drive.
+SKIP_ZONES = {}
+# Per-device (red, green, blue) gains for LEDs that don't show white as white,
+# by device name (or description when the name is empty). The AntEsports GM600's
+# green LED is weak, so its white looked pink. Tune by sending white and
+# lowering the channels that tint it.
+COLOR_BALANCE = {"Instant USB Gaming Mouse": (0.24, 1.0, 0.27)}
 # (vendor id, product id) of a VIA keyboard with RGB Matrix, or None to skip.
 # Default: Royal Kludge R65. Find yours in Device Manager > Details > Hardware Ids.
 KEYBOARD_USB_ID = (0x342D, 0xE508)
@@ -475,6 +479,7 @@ class Lights:
                 zones = [z for z in d.zones if z.name not in SKIP_ZONES.get(d.name, ())]
                 if not zones:
                     continue
+                balance = COLOR_BALANCE.get(d.name or d.metadata.description, (1, 1, 1))
                 # addressable headers report 0 LEDs until sized; extra LEDs are harmless
                 for z in zones:
                     if z.type == ZoneType.LINEAR and len(z.leds) == 0:
@@ -499,7 +504,8 @@ class Lights:
                         offset = flow_i / max(1, PALETTE_SIZE)
                         leds = [("flow", offset + k / PATTERN_LEDS) for k in range(len(z.leds))]
                         flow_i += 1
-                    self.layout.append([z, leds, None])  # zone, LED positions, last colors sent
+                    # zone, LED positions, color balance, last colors sent
+                    self.layout.append([z, leds, balance, None])
             print("Connected to OpenRGB:", ", ".join(d.name or "(unnamed)" for d in self.client.devices))
         except Exception as e:
             self.client = None
@@ -531,7 +537,7 @@ class Lights:
         from openrgb.utils import RGBColor
         try:
             for entry in self.layout:
-                zone, leds, last = entry
+                zone, leds, balance, last = entry
                 colors = []
                 for kind, pos in leds:
                     if kind == "solid":  # average a stretch of the ring
@@ -539,11 +545,17 @@ class Lights:
                         lab = tuple(sum(c) / len(labs) for c in zip(*labs))
                     else:
                         lab = ring_at(self.shown, pos)
-                    colors.append(from_oklab(lab))
+                    rgb = from_oklab(lab)
+                    if balance != (1, 1, 1):
+                        # balance the tint, then scale back up so it stays as bright
+                        bal = [c * g for c, g in zip(rgb, balance)]
+                        boost = max(rgb) / max(max(bal), 1)
+                        rgb = tuple(min(255, round(c * boost)) for c in bal)
+                    colors.append(tuple(rgb))
                 if colors == last:
                     continue  # nothing changed: don't keep hammering the controller
                 zone.set_colors([RGBColor(*c) for c in colors], fast=True)
-                entry[2] = colors
+                entry[3] = colors
         except Exception as e:
             print(f"Lost OpenRGB connection ({e})")
             self.client = None
@@ -571,6 +583,30 @@ class CaptureThread(threading.Thread):
             time.sleep(1 / FPS if self.ring is not None else 0.5)
 
 
+def request_rescan():
+    """Ask the OpenRGB server to re-detect devices, re-initializing their controllers.
+
+    After sleep the Gigabyte IT5711 comes back running its own rainbow and
+    ignores direct colors (they only make it flicker) until it's re-initialized.
+    openrgb-python only speaks SDK protocol 4, which has no rescan command, so
+    this sends the raw protocol-5 packet itself.
+    """
+    import socket
+    import struct
+    try:
+        with socket.create_connection(("127.0.0.1", 6742), timeout=2) as s:
+            s.sendall(b"ORGB" + struct.pack("<IIII", 0, 40, 4, 5))  # protocol version 5
+            reply = b""
+            while len(reply) < 20:
+                chunk = s.recv(20 - len(reply))
+                if not chunk:
+                    return
+                reply += chunk
+            s.sendall(b"ORGB" + struct.pack("<III", 0, 140, 0))  # REQUEST_RESCAN_DEVICES
+    except OSError:
+        pass
+
+
 async def render_loop(lights, keyboard, capture):
     last_tick = time.time()  # wall clock: always jumps across sleep
     while True:
@@ -585,7 +621,8 @@ async def render_loop(lights, keyboard, capture):
                 except Exception:
                     pass
             lights.client = None
-            lights.retry_at = 0.0
+            request_rescan()
+            lights.retry_at = time.monotonic() + 6  # let detection finish first
             if keyboard.dev:
                 try:
                     keyboard.dev.close()
