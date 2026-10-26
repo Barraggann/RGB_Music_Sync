@@ -46,6 +46,10 @@ LIVE_SATURATION = 1.35     # boost for the (muted) background colors on LEDs
 LIVE_MIN_BRIGHTNESS = 0.45
 IDLE_COLOR = (40, 40, 60)  # dim color while paused / nothing playing
 ARGB_HEADER_LEDS = 60      # LEDs per fan/strip header (raise if some LEDs stay dark)
+# OpenRGB zones to leave alone, per device name. OpenRGB 1.1 can't drive the fan
+# headers of the Gigabyte B850M EAGLE (IT5711 chip): they keep their rainbow and
+# only flicker when sent colors. Add your own device here if it does the same.
+SKIP_ZONES = {"B850M EAGLE WIFI6E ICE": {"ARGB_V2_1", "ARGB_V2_2", "ARGB_V2_3"}}
 # (vendor id, product id) of a VIA keyboard with RGB Matrix, or None to skip.
 # Default: Royal Kludge R65. Find yours in Device Manager > Details > Hardware Ids.
 KEYBOARD_USB_ID = (0x342D, 0xE508)
@@ -468,8 +472,11 @@ class Lights:
             self.layout = []
             solid_i = flow_i = 0
             for d in self.client.devices:
+                zones = [z for z in d.zones if z.name not in SKIP_ZONES.get(d.name, ())]
+                if not zones:
+                    continue
                 # addressable headers report 0 LEDs until sized; extra LEDs are harmless
-                for z in d.zones:
+                for z in zones:
                     if z.type == ZoneType.LINEAR and len(z.leds) == 0:
                         try:
                             z.resize(ARGB_HEADER_LEDS)
@@ -482,18 +489,17 @@ class Lights:
                         d.set_mode("static")
                     except Exception:
                         pass
-                leds = []
-                for z in d.zones:
+                for z in zones:
                     if len(z.leds) == 1:
                         # single-LED zones take different parts of the ring in turn
-                        leds.append(("solid", solid_i / PALETTE_SIZE))
+                        leds = [("solid", solid_i / PALETTE_SIZE)]
                         solid_i += 1
                     else:
                         # each header starts at a different point of the ring
                         offset = flow_i / max(1, PALETTE_SIZE)
-                        leds += [("flow", offset + k / PATTERN_LEDS) for k in range(len(z.leds))]
+                        leds = [("flow", offset + k / PATTERN_LEDS) for k in range(len(z.leds))]
                         flow_i += 1
-                self.layout.append((d, leds))
+                    self.layout.append([z, leds, None])  # zone, LED positions, last colors sent
             print("Connected to OpenRGB:", ", ".join(d.name or "(unnamed)" for d in self.client.devices))
         except Exception as e:
             self.client = None
@@ -524,7 +530,8 @@ class Lights:
             return
         from openrgb.utils import RGBColor
         try:
-            for d, leds in self.layout:
+            for entry in self.layout:
+                zone, leds, last = entry
                 colors = []
                 for kind, pos in leds:
                     if kind == "solid":  # average a stretch of the ring
@@ -532,8 +539,11 @@ class Lights:
                         lab = tuple(sum(c) / len(labs) for c in zip(*labs))
                     else:
                         lab = ring_at(self.shown, pos)
-                    colors.append(RGBColor(*from_oklab(lab)))
-                d.set_colors(colors, fast=True)
+                    colors.append(from_oklab(lab))
+                if colors == last:
+                    continue  # nothing changed: don't keep hammering the controller
+                zone.set_colors([RGBColor(*c) for c in colors], fast=True)
+                entry[2] = colors
         except Exception as e:
             print(f"Lost OpenRGB connection ({e})")
             self.client = None
